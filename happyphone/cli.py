@@ -18,7 +18,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from nacl.encoding import Base64Encoder
 import os
 
-from .config import SIGNALING_URL, DATA_DIR
+from .config import SIGNALING_URL, DATA_DIR, TEE_REQUIRE_ATTESTATION
 from .crypto import (
     create_identity, encrypt_message, decrypt_message,
     encrypt_message_ratchet, decrypt_message_ratchet, derive_shared_secret,
@@ -31,6 +31,8 @@ from .session import Session
 from .storage import storage, Storage
 from .signaling import signaling, SignalingEvent
 from .audio import VoiceCall, check_audio_dependencies
+from .waveform import WaveformDisplay
+from .tee import fetch_attestation, TEEAttestation, verify_attestation
 
 # Use plain console without any styling
 console = Console(force_terminal=False, no_color=True, legacy_windows=False, markup=False, highlight=False)
@@ -45,6 +47,7 @@ class HappyPhoneCLI:
         self.contacts_by_name: dict[str, Contact] = {}  # lowercase pet_name -> Contact
         self.active_chat: Optional[str] = None  # user_id of active chat
         self.call: Optional[VoiceCall] = None
+        self.waveform: Optional[WaveformDisplay] = None
         self.pending_verification: dict = {}  # For keyphrase verification
         self._running = False
         self._message_queue: asyncio.Queue = asyncio.Queue()
@@ -103,6 +106,25 @@ class HappyPhoneCLI:
     async def _connect(self):
         """Connect to signaling server"""
         console.print(f"Connecting to {SIGNALING_URL}...")
+        
+        # Check TEE attestation before connecting
+        console.print("Verifying server TEE attestation...")
+        attestation = await fetch_attestation()
+        is_valid, issues = verify_attestation(attestation)
+        
+        if attestation.is_confidential:
+            console.print(f"✓ {attestation.status_line()}")
+        else:
+            console.print(f"⚠ {attestation.status_line()}")
+            if issues:
+                for issue in issues:
+                    console.print(f"  - {issue}")
+            if TEE_REQUIRE_ATTESTATION:
+                console.print("✗ TEE attestation required but server is not in TEE.")
+                console.print("  Set HAPPYPHONE_TEE_REQUIRED=false to connect anyway.\n")
+                return
+            console.print("  (Messages are still E2E encrypted)")
+        
         try:
             await signaling.connect(self.identity)
             # Wait for registration
@@ -302,11 +324,17 @@ class HappyPhoneCLI:
         try:
             await self.call.handle_answer(event.data.get('answer', {}))
             console.print("📞 Call connected!")
+            # Start waveform animation
+            self.waveform = WaveformDisplay(console=console)
+            await self.waveform.start()
         except Exception as e:
             console.print(f"Call connection failed: {e}")
 
     async def _handle_call_end(self, event: SignalingEvent):
         """Handle call end"""
+        if self.waveform:
+            await self.waveform.stop()
+            self.waveform = None
         if self.call and self.call.is_active:
             await self.call.hangup()
             console.print("\n📞 Call ended by remote party")
@@ -405,6 +433,9 @@ class HappyPhoneCLI:
         elif cmd == 'reset':
             await self._cmd_reset()
 
+        elif cmd == 'tee':
+            await self._cmd_tee()
+
         elif cmd in ('quit', 'exit', 'q'):
             self._running = False
 
@@ -426,6 +457,7 @@ Commands:
   answer                     Answer incoming call
   decline                    Decline incoming call
   hangup                     End current call
+  tee                        Show server TEE attestation status
   delete <name>              Delete a contact
   reset                      Delete identity and all data
   quit                       Exit
@@ -440,11 +472,36 @@ Commands:
         audio_ok, missing = check_audio_dependencies()
         audio_status = "Available" if audio_ok else f"Missing: {', '.join(missing)}"
 
+        # Fetch TEE status
+        attestation = await fetch_attestation()
+        tee_status = attestation.status_line()
+
         console.print(f"\n  Server: {status}")
         console.print(f"  Registered: {registered}")
+        console.print(f"  {tee_status}")
         console.print(f"  Audio: {audio_status}")
         console.print(f"  Contacts: {len(self.contacts)}")
         console.print(f"  Data dir: {DATA_DIR}\n")
+
+    async def _cmd_tee(self):
+        """Show TEE attestation status"""
+        console.print("\nFetching TEE attestation from server...")
+        
+        attestation = await fetch_attestation()
+        
+        console.print(f"\n  {attestation.status_line()}")
+        
+        if attestation.is_confidential:
+            console.print(f"  VM ID: {attestation.vm_id or 'N/A'}")
+            console.print(f"  Location: {attestation.location or 'N/A'}")
+            console.print(f"  Server Version: {attestation.server_version or 'N/A'}")
+        elif attestation.error:
+            console.print(f"  Could not verify server attestation.")
+        else:
+            console.print(f"  Warning: Server is not running in a TEE.")
+            console.print(f"  Messages are still E2E encrypted, but server")
+            console.print(f"  memory could theoretically be inspected.")
+        console.print()
 
     def _cmd_id(self):
         """Show identity"""
@@ -747,6 +804,9 @@ Commands:
 
             del self.pending_verification[call_key]
             console.print("📞 Call connected!")
+            # Start waveform animation
+            self.waveform = WaveformDisplay(console=console)
+            await self.waveform.start()
 
         except Exception as e:
             console.print(f"Failed to answer: {e}")
@@ -771,6 +831,9 @@ Commands:
     async def _cmd_hangup(self):
         """End current call"""
         if self.call and self.call.is_active:
+            if self.waveform:
+                await self.waveform.stop()
+                self.waveform = None
             await signaling.send_call_end(self.call.remote_user_id)
             await self.call.hangup()
             self.call = None
@@ -806,6 +869,10 @@ Commands:
     async def _shutdown(self):
         """Clean shutdown"""
         console.print("\nShutting down...")
+
+        if self.waveform:
+            await self.waveform.stop()
+            self.waveform = None
 
         if self.call and self.call.is_active:
             await self.call.hangup()

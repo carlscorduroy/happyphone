@@ -26,5 +26,11 @@ AUDIO_SAMPLE_RATE = 48000
 AUDIO_CHANNELS = 1
 AUDIO_CHUNK_SIZE = 960  # 20ms at 48kHz
 
+# TEE Attestation settings
+TEE_ATTESTATION_ENABLED = os.environ.get("HAPPYPHONE_TEE_ENABLED", "true").lower() == "true"
+TEE_REQUIRE_ATTESTATION = os.environ.get("HAPPYPHONE_TEE_REQUIRED", "false").lower() == "true"
+TEE_EXPECTED_VM_SIZES = ["Standard_DC2as_v5", "Standard_DC4as_v5", "Standard_DC8as_v5"]  # Valid CVM sizes
+TEE_EXPECTED_MEASUREMENT = os.environ.get("HAPPYPHONE_TEE_MEASUREMENT", "")  # Optional code hash
+
 # Ensure data directory exists
 DATA_DIR.mkdir(parents=True, exist_ok=True)

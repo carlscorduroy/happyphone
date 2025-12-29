@@ -3,9 +3,9 @@ set -e
 
 # Configuration
 RESOURCE_GROUP="happyphone-tee"
-LOCATION="eastus"
+LOCATION="westus"
 VM_NAME="happyphone-signal-tee"
-VM_SIZE="Standard_DC4as_v5"
+VM_SIZE="Standard_DC2as_v5"  # 2 vCPUs (fits 4 vCPU quota)
 IMAGE="Canonical:0001-com-ubuntu-confidential-vm-jammy:22_04-lts-cvm:latest"
 ADMIN_USER="azureuser"
 
@@ -14,7 +14,7 @@ echo ""
 echo "Configuration:"
 echo "  Resource Group: $RESOURCE_GROUP"
 echo "  Location: $LOCATION"
-echo "  VM Size: $VM_SIZE (4 vCPUs, 16GB RAM, AMD SEV-SNP)"
+echo "  VM Size: $VM_SIZE (2 vCPUs, 8GB RAM, AMD SEV-SNP)"
 echo "  OS: Ubuntu 22.04 LTS (Confidential VM image)"
 echo ""
 

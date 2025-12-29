@@ -245,9 +245,16 @@ if AIORTC_AVAILABLE:
             offer = await self.pc.createOffer()
             await self.pc.setLocalDescription(offer)
 
+            # Wait for ICE gathering to complete
+            import asyncio
+            while self.pc.iceGatheringState != "complete":
+                await asyncio.sleep(0.1)
+                if self.pc.iceGatheringState == "complete":
+                    break
+
             return {
-                "type": offer.type,
-                "sdp": offer.sdp,
+                "type": self.pc.localDescription.type,
+                "sdp": self.pc.localDescription.sdp,
             }
 
         async def handle_offer(self, offer: dict) -> dict:
@@ -263,9 +270,16 @@ if AIORTC_AVAILABLE:
             answer = await self.pc.createAnswer()
             await self.pc.setLocalDescription(answer)
 
+            # Wait for ICE gathering to complete
+            import asyncio
+            while self.pc.iceGatheringState != "complete":
+                await asyncio.sleep(0.1)
+                if self.pc.iceGatheringState == "complete":
+                    break
+
             return {
-                "type": answer.type,
-                "sdp": answer.sdp,
+                "type": self.pc.localDescription.type,
+                "sdp": self.pc.localDescription.sdp,
             }
 
         async def handle_answer(self, answer: dict):
@@ -281,9 +295,17 @@ if AIORTC_AVAILABLE:
             if not self.pc:
                 return
 
-            # aiortc handles ICE candidates internally through the SDP
-            # This is a placeholder for explicit candidate handling if needed
-            pass
+            try:
+                from aiortc import RTCIceCandidate
+                if candidate:
+                    ice_candidate = RTCIceCandidate(
+                        sdpMid=candidate.get('sdpMid'),
+                        sdpMLineIndex=candidate.get('sdpMLineIndex'),
+                        candidate=candidate.get('candidate')
+                    )
+                    await self.pc.addIceCandidate(ice_candidate)
+            except Exception as e:
+                print(f"⚠️ ICE candidate error: {e}")
 
         async def hangup(self):
             """End the call"""
@@ -322,7 +344,8 @@ else:
 def check_audio_dependencies() -> tuple[bool, list[str]]:
     """Check if audio dependencies are available"""
     missing = []
-    if not PYAUDIO_AVAILABLE:
+    # Accept either pyaudio or sounddevice
+    if not PYAUDIO_AVAILABLE and not SOUNDDEVICE_AVAILABLE:
         missing.append("pyaudio")
     if not AIORTC_AVAILABLE:
         missing.append("aiortc")
