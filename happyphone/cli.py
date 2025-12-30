@@ -622,12 +622,8 @@ Commands:
             console.print("Not connected to server")
             return
 
-        # Check if already exists
-        if user_id in self.contacts:
-            console.print(f"Contact {user_id} already exists")
-            return
-
-        # Check if there's a pending incoming request
+        # Check if there's a pending incoming request FIRST
+        # (even if contact exists, we need to respond to complete their verification)
         pending = self.pending_verification.get(user_id)
         if pending and pending.get('direction') == 'incoming':
             # Respond to their request
@@ -647,7 +643,8 @@ Commands:
                     })
                 )
 
-                # Add contact
+                # Add or update contact
+                existing_contact = self.contacts.get(user_id)
                 contact = Contact(
                     user_id=user_id,
                     public_key=public_key_from_b64(pending['public_key']),
@@ -657,6 +654,14 @@ Commands:
                     verified=True,
                 )
                 await storage.save_contact(contact)
+                
+                # Update in-memory caches
+                if existing_contact:
+                    # Remove old pet_name mapping if it changed
+                    old_pet_name = existing_contact.pet_name.lower()
+                    if old_pet_name in self.contacts_by_name:
+                        del self.contacts_by_name[old_pet_name]
+                
                 self.contacts[contact.user_id] = contact
                 self.contacts_by_name[contact.pet_name.lower()] = contact
 
@@ -668,13 +673,21 @@ Commands:
                 session = Session.initialize_bob(shared_secret, self.identity.private_key)
                 await storage.save_session_state(user_id, session.get_state_dict())
 
-                console.print(f"✓ Contact added: {pet_name}")
+                if existing_contact:
+                    console.print(f"✓ Contact re-verified: {pet_name}")
+                else:
+                    console.print(f"✓ Contact added: {pet_name}")
                 del self.pending_verification[user_id]
                 return
 
             except Exception as e:
                 console.print(f"Failed to respond: {e}")
                 return
+
+        # Check if already exists before initiating a NEW request
+        if user_id in self.contacts:
+            console.print(f"Contact {user_id} already exists. To re-verify, they need to send you a request first.")
+            return
 
         # Initiate new request
         console.print(f"Sending verification request to {user_id}...")
