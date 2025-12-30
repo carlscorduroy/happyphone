@@ -51,3 +51,5 @@ PyAudio-*/
 *.tar.gz
 TURN-CREDENTIALS.txt
 dist/
+TURN-CREDENTIALS.txt
+dist/
