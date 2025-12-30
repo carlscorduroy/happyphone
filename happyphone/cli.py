@@ -34,7 +34,10 @@ from .storage import storage, Storage
 from .signaling import signaling, SignalingEvent
 from .audio import VoiceCall, check_audio_dependencies
 from .waveform import WaveformDisplay
-from .tee import fetch_attestation, TEEAttestation, verify_attestation
+from .tee import (
+    fetch_attestation, fetch_and_verify_attestation, 
+    TEEAttestation, verify_attestation, format_verification_summary
+)
 
 # Use plain console without any styling
 console = Console(force_terminal=False, no_color=True, legacy_windows=False, markup=False, highlight=False)
@@ -496,7 +499,11 @@ class HappyPhoneCLI:
             await self._cmd_reset()
 
         elif cmd == 'tee':
-            await self._cmd_tee()
+            # Check for 'tee verify' subcommand
+            if len(parts) > 1 and parts[1].lower() == 'verify':
+                await self._cmd_tee(detailed=True)
+            else:
+                await self._cmd_tee()
 
         elif cmd in ('quit', 'exit', 'q'):
             self._running = False
@@ -520,6 +527,7 @@ Commands:
   decline                    Decline incoming call
   hangup                     End current call
   tee                        Show server TEE attestation status
+  tee verify                  Cryptographically verify TEE attestation
   delete <name>              Delete a contact
   reset                      Delete identity and all data
   quit                       Exit
@@ -545,24 +553,36 @@ Commands:
         console.print(f"  Contacts: {len(self.contacts)}")
         console.print(f"  Data dir: {DATA_DIR}\n")
 
-    async def _cmd_tee(self):
+    async def _cmd_tee(self, detailed: bool = False):
         """Show TEE attestation status"""
-        console.print("\nFetching TEE attestation from server...")
-        
-        attestation = await fetch_attestation()
-        
-        console.print(f"\n  {attestation.status_line()}")
-        
-        if attestation.is_confidential:
-            console.print(f"  VM ID: {attestation.vm_id or 'N/A'}")
-            console.print(f"  Location: {attestation.location or 'N/A'}")
-            console.print(f"  Server Version: {attestation.server_version or 'N/A'}")
-        elif attestation.error:
-            console.print(f"  Could not verify server attestation.")
+        if detailed:
+            console.print("\nFetching TEE attestation with cryptographic verification...")
+            console.print("This verifies the AMD certificate chain and report signature.\n")
+            
+            attestation = await fetch_and_verify_attestation()
+            
+            # Print detailed verification summary
+            summary = format_verification_summary(attestation)
+            for line in summary.split('\n'):
+                console.print(f"  {line}")
         else:
-            console.print(f"  Warning: Server is not running in a TEE.")
-            console.print(f"  Messages are still E2E encrypted, but server")
-            console.print(f"  memory could theoretically be inspected.")
+            console.print("\nFetching TEE attestation from server...")
+            
+            attestation = await fetch_attestation()
+            
+            console.print(f"\n  {attestation.status_line()}")
+            
+            if attestation.is_confidential:
+                console.print(f"  VM ID: {attestation.vm_id or 'N/A'}")
+                console.print(f"  Location: {attestation.location or 'N/A'}")
+                console.print(f"  Server Version: {attestation.server_version or 'N/A'}")
+                console.print(f"\n  Use 'tee verify' for cryptographic verification.")
+            elif attestation.error:
+                console.print(f"  Could not verify server attestation.")
+            else:
+                console.print(f"  Warning: Server is not running in a TEE.")
+                console.print(f"  Messages are still E2E encrypted, but server")
+                console.print(f"  memory could theoretically be inspected.")
         console.print()
 
     def _cmd_id(self):

@@ -44,10 +44,25 @@ app.get('/health', (req, res) => {
   });
 });
 
-// TEE Attestation endpoint
+// TEE Attestation endpoint (GET - basic info)
 app.get('/attestation', async (req, res) => {
   try {
     const attestation = await getAttestation();
+    res.json(attestation);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get attestation',
+      message: error.message,
+      teeAvailable: false
+    });
+  }
+});
+
+// TEE Attestation endpoint (POST - with challenge-response for crypto verification)
+app.post('/attestation', express.json(), async (req, res) => {
+  try {
+    const { nonce } = req.body;
+    const attestation = await getAttestation(nonce);
     res.json(attestation);
   } catch (error) {
     res.status(500).json({
@@ -112,8 +127,9 @@ function getTEEStatus() {
 
 /**
  * Get hardware attestation report
+ * @param {string} nonceB64 - Base64-encoded 64-byte nonce from client (optional)
  */
-async function getAttestation() {
+async function getAttestation(nonceB64 = null) {
   const teeStatus = getTEEStatus();
   
   const attestation = {
@@ -128,14 +144,77 @@ async function getAttestation() {
   }
 
   try {
-    // Try to get SEV-SNP attestation report
+    // Try to get SEV-SNP attestation report with client's nonce
     if (fs.existsSync('/dev/sev-guest')) {
-      // Use sev-guest-get-report tool if available
-      const report = execSync('sev-guest-get-report 2>/dev/null || echo "report_unavailable"', { encoding: 'utf8' });
-      if (!report.includes('report_unavailable')) {
-        attestation.report = report.trim();
-        attestation.reportType = 'sev-snp';
+      let reportCmd;
+      
+      if (nonceB64) {
+        // Client provided a nonce - include it in the report request
+        // The nonce goes into the report_data field (64 bytes)
+        // This proves freshness and prevents replay attacks
+        const reportDataFile = '/tmp/snp_report_data_' + process.pid;
+        
+        try {
+          // Decode nonce and pad to 64 bytes
+          const nonceBuffer = Buffer.from(nonceB64, 'base64');
+          const reportData = Buffer.alloc(64);
+          nonceBuffer.copy(reportData, 0, 0, Math.min(nonceBuffer.length, 64));
+          fs.writeFileSync(reportDataFile, reportData);
+          
+          // Request report with custom report_data
+          // Using snpguest tool from virtee/snpguest
+          reportCmd = `snpguest report ${reportDataFile} /tmp/snp_report_${process.pid}.bin 2>/dev/null && ` +
+                      `base64 /tmp/snp_report_${process.pid}.bin && ` +
+                      `rm -f ${reportDataFile} /tmp/snp_report_${process.pid}.bin`;
+        } catch (e) {
+          console.error('Failed to create report data file:', e);
+        }
+      } else {
+        // No nonce - just get a report (less secure, can be replayed)
+        reportCmd = 'snpguest report /dev/null /tmp/snp_report.bin 2>/dev/null && ' +
+                    'base64 /tmp/snp_report.bin && ' +
+                    'rm -f /tmp/snp_report.bin';
       }
+      
+      if (reportCmd) {
+        try {
+          const reportB64 = execSync(reportCmd, { encoding: 'utf8', timeout: 5000 });
+          if (reportB64 && reportB64.trim()) {
+            attestation.report = reportB64.trim();
+            attestation.reportType = 'sev-snp';
+          }
+        } catch (e) {
+          // snpguest not available, try sev-guest-get-report
+          try {
+            const report = execSync('sev-guest-get-report 2>/dev/null', { encoding: 'utf8' });
+            if (report && !report.includes('report_unavailable')) {
+              attestation.report = Buffer.from(report.trim()).toString('base64');
+              attestation.reportType = 'sev-snp';
+            }
+          } catch {
+            // No report tool available
+            attestation.reportError = 'SNP report tool not available (install snpguest)';
+          }
+        }
+      }
+      
+      // Try to get VCEK certificate from host memory (Azure provides this)
+      try {
+        if (fs.existsSync('/var/run/amd-sev/vcek.pem')) {
+          attestation.vcek = fs.readFileSync('/var/run/amd-sev/vcek.pem', 'utf8');
+        } else {
+          // Try to fetch from extended guest request
+          const vcekCmd = 'snpguest fetch vcek pem /tmp/vcek_${PID} 2>/dev/null && ' +
+                          'cat /tmp/vcek_${PID}/vcek.pem && ' +
+                          'rm -rf /tmp/vcek_${PID}';
+          try {
+            const vcek = execSync(vcekCmd.replace(/\$\{PID\}/g, process.pid), { encoding: 'utf8', timeout: 10000 });
+            if (vcek && vcek.includes('BEGIN CERTIFICATE')) {
+              attestation.vcek = vcek.trim();
+            }
+          } catch {}
+        }
+      } catch {}
     }
 
     // Get VM metadata from Azure IMDS

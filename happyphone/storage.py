@@ -45,7 +45,7 @@ class Storage:
 
             CREATE TABLE IF NOT EXISTS contacts (
                 user_id TEXT PRIMARY KEY,
-                public_key TEXT NOT NULL,
+                public_key TEXT,
                 display_name TEXT NOT NULL,
                 pet_name TEXT NOT NULL,
                 trust_tier TEXT DEFAULT 'other',
