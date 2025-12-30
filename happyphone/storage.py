@@ -116,6 +116,29 @@ class Storage:
             "CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at)"
         )
         await self._db.commit()
+        
+        # Fix contacts.public_key column to allow NULL (for pending verifications)
+        # SQLite doesn't support ALTER COLUMN, so check if migration needed
+        async with self._db.execute("PRAGMA table_info(contacts)") as cursor:
+            async for row in cursor:
+                if row['name'] == 'public_key' and row['notnull'] == 1:
+                    # Need to recreate table without NOT NULL constraint
+                    await self._db.executescript("""
+                        CREATE TABLE IF NOT EXISTS contacts_new (
+                            user_id TEXT PRIMARY KEY,
+                            public_key TEXT,
+                            display_name TEXT NOT NULL,
+                            pet_name TEXT NOT NULL,
+                            trust_tier TEXT DEFAULT 'other',
+                            verified INTEGER DEFAULT 0,
+                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                        INSERT INTO contacts_new SELECT * FROM contacts;
+                        DROP TABLE contacts;
+                        ALTER TABLE contacts_new RENAME TO contacts;
+                    """)
+                    await self._db.commit()
+                    break
 
     # === Identity Operations ===
 

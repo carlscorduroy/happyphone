@@ -693,7 +693,7 @@ Commands:
                 })
             )
 
-            # Store pending verification
+            # Store pending verification (don't save to DB until we have public key)
             self.pending_verification[user_id] = {
                 'challenge': challenge_b64,
                 'salt': salt_b64,
@@ -703,21 +703,8 @@ Commands:
                 'direction': 'outgoing',
             }
 
-            # Add contact immediately (will be marked verified when they respond)
-            contact = Contact(
-                user_id=user_id,
-                public_key=None,  # Will be set when they respond
-                display_name=pet_name,
-                pet_name=pet_name,
-                trust_tier='other',
-                verified=False,  # Not verified until they respond
-            )
-            await storage.save_contact(contact)
-            self.contacts[contact.user_id] = contact
-            self.contacts_by_name[contact.pet_name.lower()] = contact
-
-            console.print(f"✓ Contact added: {pet_name} (unverified)")
-            console.print(f"Waiting for {user_id} to verify...")
+            console.print(f"✓ Verification request sent to {user_id}")
+            console.print(f"Waiting for them to verify...")
             console.print(f"They need to run: add {self.identity.user_id} {keyphrase} <your_name>")
 
         except Exception as e:
