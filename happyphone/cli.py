@@ -853,6 +853,13 @@ Commands:
 
     async def _cmd_answer(self):
         """Answer incoming call"""
+        # Check audio dependencies first
+        audio_ok, missing = check_audio_dependencies()
+        if not audio_ok:
+            console.print(f"Audio not available. Missing: {', '.join(missing)}")
+            console.print("Install with: pip install pyaudio aiortc")
+            return
+
         # Find pending call
         call_key = None
         offer = None
