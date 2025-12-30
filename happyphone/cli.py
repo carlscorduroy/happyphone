@@ -57,9 +57,8 @@ class HappyPhoneCLI:
     async def start(self):
         """Start the CLI application"""
         console.print(Panel.fit(
-            "📱 Happy Phone[/bold green]\n"
-            "End-to-End Encrypted Communication",
-            border_style="green"
+            "📱 Happy Phone\n"
+            "End-to-End Encrypted Communication"
         ))
 
         # Initialize storage
@@ -373,7 +372,7 @@ class HappyPhoneCLI:
         caller_name = contact.pet_name if contact else event.from_user
         verified = "✓" if contact and contact.verified else "⚠"
 
-        console.print(f"\n📞 Incoming call from {caller_name} {verified}[/bold yellow]")
+        console.print(f"\n📞 Incoming call from {caller_name} {verified}")
         console.print("Type 'answer' to accept or 'decline' to reject")
 
         # Store offer for answering
@@ -569,7 +568,7 @@ Commands:
     def _cmd_id(self):
         """Show identity"""
         fingerprint = " ".join(self.identity.get_fingerprint())
-        console.print(f"\n  User ID: {self.identity.user_id}[/bold cyan]")
+        console.print(f"\n  User ID: {self.identity.user_id}")
         console.print(f"  Name: {self.identity.display_name}")
         console.print(f"  Fingerprint: {fingerprint}")
         console.print(f"\n  Share your User ID with contacts\n")
