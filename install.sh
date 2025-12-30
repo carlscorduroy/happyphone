@@ -1,79 +1,72 @@
 #!/bin/bash
-# Happy Phone CLI - Install Helper
+#
+# Happy Phone - One-Line Installer for macOS/Linux
+# Usage: curl -fsSL https://raw.githubusercontent.com/carlscorduroy/happyphone/main/install.sh | bash
+#
 
 set -e
 
-echo "📱 Happy Phone CLI Installer"
-echo "============================"
-echo
-
-# Detect OS
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    OS="macos"
-elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    OS="linux"
-else
-    OS="unknown"
-fi
-
-echo "Detected OS: $OS"
-echo
+echo ""
+echo "📱 Installing Happy Phone..."
+echo ""
 
 # Check Python
 if ! command -v python3 &> /dev/null; then
-    echo "❌ Python 3 not found. Please install Python 3.9+"
+    echo "❌ Python 3 not found."
+    echo "   macOS: It should be pre-installed. Try: xcode-select --install"
+    echo "   Linux: sudo apt install python3 python3-pip python3-venv"
     exit 1
 fi
 
-PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-echo "✓ Python $PYTHON_VERSION found"
+INSTALL_DIR="$HOME/.happyphone-cli"
+BIN_DIR="$HOME/.local/bin"
 
-# Install system dependencies for voice (optional)
-echo
-read -p "Install voice call dependencies? (requires sudo) [y/N] " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    if [[ "$OS" == "macos" ]]; then
-        echo "Installing macOS dependencies via Homebrew..."
-        if ! command -v brew &> /dev/null; then
-            echo "❌ Homebrew not found. Install from https://brew.sh"
-            exit 1
-        fi
-        brew install portaudio opus libvpx
-    elif [[ "$OS" == "linux" ]]; then
-        echo "Installing Linux dependencies..."
-        sudo apt update
-        sudo apt install -y portaudio19-dev python3-pyaudio libopus-dev libvpx-dev
-    fi
-    echo "✓ System dependencies installed"
+# Download
+echo "⬇️  Downloading..."
+rm -rf "$INSTALL_DIR"
+if command -v git &> /dev/null; then
+    git clone --quiet --depth 1 https://github.com/carlscorduroy/happyphone.git "$INSTALL_DIR"
+else
+    # Fallback: download zip
+    curl -fsSL https://github.com/carlscorduroy/happyphone/archive/refs/heads/main.zip -o /tmp/happyphone.zip
+    unzip -q /tmp/happyphone.zip -d /tmp
+    mv /tmp/happyphone-main "$INSTALL_DIR"
+    rm /tmp/happyphone.zip
 fi
 
-# Create virtual environment (optional but recommended)
-echo
-read -p "Create virtual environment? (recommended) [Y/n] " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    python3 -m venv venv
-    source venv/bin/activate
-    echo "✓ Virtual environment created and activated"
+# Create venv and install
+echo "📦 Installing..."
+cd "$INSTALL_DIR"
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip -q
+pip install -e . -q
+deactivate
+
+# Create launcher
+mkdir -p "$BIN_DIR"
+cat > "$BIN_DIR/happy" << 'EOF'
+#!/bin/bash
+source "$HOME/.happyphone-cli/venv/bin/activate"
+python3 -m happyphone "$@"
+EOF
+chmod +x "$BIN_DIR/happy"
+
+# Add to PATH if needed
+if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    SHELL_RC="$HOME/.zshrc"
+    [[ -f "$HOME/.bashrc" ]] && [[ ! -f "$HOME/.zshrc" ]] && SHELL_RC="$HOME/.bashrc"
+    echo "" >> "$SHELL_RC"
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
+    echo ""
+    echo "✅ Installed! Run this to start:"
+    echo ""
+    echo "   source $SHELL_RC && happy"
+    echo ""
+else
+    echo ""
+    echo "✅ Installed! Run this to start:"
+    echo ""
+    echo "   happy"
+    echo ""
 fi
-
-# Install Python package
-echo
-echo "Installing Happy Phone CLI..."
-pip install -e .
-
-# Install voice dependencies if system deps were installed
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo "Installing voice call packages..."
-    pip install pyaudio aiortc || echo "⚠️ Voice packages failed (text messaging will still work)"
-fi
-
-echo
-echo "✅ Installation complete!"
-echo
-echo "Run with: happyphone"
-echo
-echo "Or if using virtual environment:"
-echo "  source venv/bin/activate"
-echo "  happyphone"
