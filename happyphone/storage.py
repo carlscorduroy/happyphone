@@ -156,13 +156,17 @@ class Storage:
 
     async def save_contact(self, contact: Contact):
         """Save or update contact"""
+        public_key_str = None
+        if contact.public_key is not None:
+            public_key_str = Base64Encoder.encode(contact.public_key).decode('ascii')
+        
         await self._db.execute("""
             INSERT OR REPLACE INTO contacts 
             (user_id, public_key, display_name, pet_name, trust_tier, verified)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (
             contact.user_id,
-            Base64Encoder.encode(contact.public_key).decode('ascii'),
+            public_key_str,
             contact.display_name,
             contact.pet_name,
             contact.trust_tier,
@@ -205,9 +209,13 @@ class Storage:
         await self._db.commit()
 
     def _row_to_contact(self, row) -> Contact:
+        public_key = None
+        if row['public_key'] is not None:
+            public_key = Base64Encoder.decode(row['public_key'].encode('ascii'))
+        
         return Contact(
             user_id=row['user_id'],
-            public_key=Base64Encoder.decode(row['public_key'].encode('ascii')),
+            public_key=public_key,
             display_name=row['display_name'],
             pet_name=row['pet_name'],
             trust_tier=row['trust_tier'],

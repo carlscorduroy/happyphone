@@ -45,13 +45,15 @@ class Identity:
 class Contact:
     """A verified contact"""
     user_id: str
-    public_key: bytes
+    public_key: Optional[bytes]
     display_name: str
     pet_name: str
     trust_tier: str  # 'family', 'business', 'other'
     verified: bool
 
     def public_key_b64(self) -> str:
+        if self.public_key is None:
+            return ""
         return Base64Encoder.encode(self.public_key).decode('ascii')
 
 

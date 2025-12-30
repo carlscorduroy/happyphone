@@ -245,7 +245,7 @@ class HappyPhoneCLI:
                     await storage.save_session_state(sender_user_id, updated_state)
                 else:
                     # Initialize session if we don't have one (Bob side receiving first message)
-                    if contact:
+                    if contact and contact.public_key:
                         shared_secret = derive_shared_secret(
                             self.identity.private_key,
                             contact.public_key
@@ -257,7 +257,7 @@ class HappyPhoneCLI:
                         )
                         await storage.save_session_state(sender_user_id, updated_state)
                     else:
-                        raise ValueError("Cannot decrypt: contact not found")
+                        raise ValueError("Cannot decrypt: contact not found or not verified")
             else:
                 # Fallback to ephemeral decryption (v1)
                 plaintext = decrypt_message(payload, self.identity.private_key)
@@ -683,6 +683,20 @@ Commands:
                 'direction': 'outgoing',
             }
 
+            # Add contact immediately (will be marked verified when they respond)
+            contact = Contact(
+                user_id=user_id,
+                public_key=None,  # Will be set when they respond
+                display_name=pet_name,
+                pet_name=pet_name,
+                trust_tier='other',
+                verified=False,  # Not verified until they respond
+            )
+            await storage.save_contact(contact)
+            self.contacts[contact.user_id] = contact
+            self.contacts_by_name[contact.pet_name.lower()] = contact
+
+            console.print(f"✓ Contact added: {pet_name} (unverified)")
             console.print(f"Waiting for {user_id} to verify...")
             console.print(f"They need to run: add {self.identity.user_id} {keyphrase} <your_name>")
 
@@ -697,6 +711,10 @@ Commands:
 
         if not contact:
             console.print(f"Contact '{name}' not found")
+            return
+
+        if not contact.verified or not contact.public_key:
+            console.print(f"Contact '{name}' is not verified yet. Wait for them to complete verification.")
             return
 
         if not signaling.is_connected:
