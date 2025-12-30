@@ -9,7 +9,7 @@ import aiosqlite
 
 from nacl.encoding import Base64Encoder
 
-from .config import DB_PATH
+from .config import DB_PATH, MESSAGE_EXPIRATION_SECONDS
 from .crypto import Identity, Contact
 
 
@@ -60,6 +60,7 @@ class Storage:
                 content TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 status TEXT DEFAULT 'sent',
+                expires_at INTEGER,
                 FOREIGN KEY (contact_id) REFERENCES contacts(user_id)
             );
 
@@ -79,7 +80,41 @@ class Storage:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (contact_user_id) REFERENCES contacts(user_id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS skipped_message_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contact_user_id TEXT NOT NULL,
+                dh_public BLOB NOT NULL,
+                msg_num INTEGER NOT NULL,
+                message_key BLOB NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (contact_user_id) REFERENCES contacts(user_id) ON DELETE CASCADE,
+                UNIQUE(contact_user_id, dh_public, msg_num)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_skipped_keys_contact ON skipped_message_keys(contact_user_id);
         """)
+        await self._db.commit()
+        
+        # Run migrations for existing databases
+        await self._run_migrations()
+
+    async def _run_migrations(self):
+        """Run database migrations for schema updates"""
+        # Check if expires_at column exists in messages table
+        async with self._db.execute("PRAGMA table_info(messages)") as cursor:
+            columns = [row['name'] async for row in cursor]
+            
+        if 'expires_at' not in columns:
+            await self._db.execute(
+                "ALTER TABLE messages ADD COLUMN expires_at INTEGER"
+            )
+            await self._db.commit()
+            
+        # Ensure index exists (now that we're sure the column exists)
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at)"
+        )
         await self._db.commit()
 
     # === Identity Operations ===
@@ -188,14 +223,28 @@ class Storage:
         direction: str,
         content: str,
         timestamp: int,
-        status: str = 'sent'
+        status: str = 'sent',
+        expires_in: int = None
     ):
-        """Save a message"""
+        """Save a message with optional expiration
+        
+        Args:
+            expires_in: Seconds until message expires. None uses default from config.
+                       0 means no expiration.
+        """
+        # Calculate expiration timestamp
+        if expires_in is None:
+            expires_in = MESSAGE_EXPIRATION_SECONDS
+        
+        expires_at = None
+        if expires_in > 0:
+            expires_at = timestamp + (expires_in * 1000)  # Convert to milliseconds
+        
         await self._db.execute("""
             INSERT OR REPLACE INTO messages 
-            (id, contact_id, direction, content, timestamp, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (message_id, contact_id, direction, content, timestamp, status))
+            (id, contact_id, direction, content, timestamp, status, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (message_id, contact_id, direction, content, timestamp, status, expires_at))
         await self._db.commit()
 
     async def get_messages(self, contact_id: str, limit: int = 50) -> list[dict]:
@@ -226,10 +275,26 @@ class Storage:
         )
         await self._db.commit()
 
+    async def delete_expired_messages(self) -> int:
+        """Delete all expired messages and return count deleted"""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        cursor = await self._db.execute(
+            "DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at < ?",
+            (now_ms,)
+        )
+        deleted = cursor.rowcount
+        await self._db.commit()
+        return deleted
+
+    async def delete_message(self, message_id: str):
+        """Delete a specific message"""
+        await self._db.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+        await self._db.commit()
+
     # === Session State Operations ===
 
     async def save_session_state(self, contact_user_id: str, state_dict: dict):
-        """Save or update session state for a contact"""
+        """Save or update session state for a contact, including skipped message keys"""
         await self._db.execute("""
             INSERT OR REPLACE INTO session_state (
                 contact_user_id, root_key, sending_chain_key, receiving_chain_key,
@@ -248,10 +313,29 @@ class Storage:
             state_dict['receiving_msg_num'],
             state_dict['previous_sending_chain_length'],
         ))
+        
+        # Save skipped message keys
+        skipped_keys = state_dict.get('skipped_message_keys', {})
+        if skipped_keys:
+            # Clear existing keys for this contact and re-insert
+            await self._db.execute(
+                "DELETE FROM skipped_message_keys WHERE contact_user_id = ?",
+                (contact_user_id,)
+            )
+            for key_str, message_key in skipped_keys.items():
+                dh_public_hex, msg_num_str = key_str.split(':', 1)
+                dh_public = bytes.fromhex(dh_public_hex)
+                msg_num = int(msg_num_str)
+                await self._db.execute("""
+                    INSERT INTO skipped_message_keys 
+                    (contact_user_id, dh_public, msg_num, message_key)
+                    VALUES (?, ?, ?, ?)
+                """, (contact_user_id, dh_public, msg_num, message_key))
+        
         await self._db.commit()
 
     async def get_session_state(self, contact_user_id: str) -> Optional[dict]:
-        """Get session state for a contact"""
+        """Get session state for a contact, including skipped message keys"""
         async with self._db.execute(
             "SELECT * FROM session_state WHERE contact_user_id = ?",
             (contact_user_id,)
@@ -259,6 +343,19 @@ class Storage:
             row = await cursor.fetchone()
             if not row:
                 return None
+            
+            # Load skipped message keys
+            skipped_keys = {}
+            async with self._db.execute(
+                "SELECT dh_public, msg_num, message_key FROM skipped_message_keys WHERE contact_user_id = ?",
+                (contact_user_id,)
+            ) as key_cursor:
+                async for key_row in key_cursor:
+                    dh_public_hex = key_row['dh_public'].hex()
+                    msg_num = key_row['msg_num']
+                    key_str = f"{dh_public_hex}:{msg_num}"
+                    skipped_keys[key_str] = key_row['message_key']
+            
             return {
                 'root_key': row['root_key'],
                 'sending_chain_key': row['sending_chain_key'],
@@ -268,11 +365,15 @@ class Storage:
                 'sending_msg_num': row['sending_msg_num'],
                 'receiving_msg_num': row['receiving_msg_num'],
                 'previous_sending_chain_length': row['previous_sending_chain_length'],
-                'skipped_message_keys': {},  # Not persisted, will be rebuilt
+                'skipped_message_keys': skipped_keys,
             }
 
     async def delete_session_state(self, contact_user_id: str):
         """Delete session state for a contact"""
+        await self._db.execute(
+            "DELETE FROM skipped_message_keys WHERE contact_user_id = ?",
+            (contact_user_id,)
+        )
         await self._db.execute(
             "DELETE FROM session_state WHERE contact_user_id = ?",
             (contact_user_id,)

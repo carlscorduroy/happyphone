@@ -25,7 +25,9 @@ from .crypto import (
     generate_challenge, respond_to_challenge, verify_challenge,
     get_fingerprint, get_shared_fingerprint,
     public_key_to_b64, public_key_from_b64,
-    Identity, Contact, EncryptedPayload
+    seal_sender, unseal_sender, is_sealed_sender,
+    pad_message, unpad_message,
+    Identity, Contact, EncryptedPayload, SealedSenderPayload
 )
 from .session import Session
 from .storage import storage, Storage
@@ -62,6 +64,11 @@ class HappyPhoneCLI:
 
         # Initialize storage
         await storage.connect()
+        
+        # Clean up expired messages
+        deleted = await storage.delete_expired_messages()
+        if deleted > 0:
+            console.print(f"Cleaned up {deleted} expired message(s)")
 
         # Load or create identity
         self.identity = await storage.get_identity()
@@ -82,20 +89,60 @@ class HappyPhoneCLI:
         await self._main_loop()
 
     async def _create_identity_flow(self):
-        """Interactive identity creation"""
-        console.print("\nNo identity found. Let's create one.\n")
-
+        """Interactive first-run identity wizard"""
         session = PromptSession()
-        name = await session.prompt_async("Enter your display name: ")
-
+        
+        # Welcome screen
+        console.print("\n" + "═" * 50)
+        console.print("  🎉 Welcome to Happy Phone!")
+        console.print("═" * 50)
+        console.print("\nThis is your first time running Happy Phone.")
+        console.print("Let's set up your secure identity in 30 seconds.\n")
+        
+        # Step 1: Name
+        console.print("STEP 1 of 3: Choose your display name")
+        console.print("─" * 40)
+        console.print("This is what your contacts will see.")
+        console.print("Examples: Alice, Bob, Mom, Work Phone\n")
+        
+        name = ""
+        while not name.strip():
+            name = await session.prompt_async("Your name: ")
+            if not name.strip():
+                console.print("Please enter a name.")
+        
+        # Step 2: Create identity
+        console.print("\nSTEP 2 of 3: Generating secure keys...")
+        console.print("─" * 40)
+        
         self.identity = create_identity(name.strip())
         await storage.save_identity(self.identity)
-
+        
         fingerprint = " ".join(self.identity.get_fingerprint())
-        console.print(f"\n✓ Identity created!")
-        console.print(f"  Your ID: {self.identity.user_id}[/bold cyan]")
-        console.print(f"  Fingerprint: {fingerprint}")
-        console.print(f"\n  Share your ID with contacts to connect.\n")
+        console.print("✓ Cryptographic identity created!\n")
+        
+        # Step 3: Show ID
+        console.print("STEP 3 of 3: Your unique ID")
+        console.print("─" * 40)
+        console.print(f"\n  ╔══════════════════════════════╗")
+        console.print(f"  ║  Your ID:  {self.identity.user_id}            ║")
+        console.print(f"  ╚══════════════════════════════╝\n")
+        console.print(f"  Fingerprint: {fingerprint}\n")
+        
+        # Quick start guide
+        console.print("═" * 50)
+        console.print("  📖 Quick Start Guide")
+        console.print("═" * 50)
+        console.print("\n1. SHARE your ID with someone you want to chat with")
+        console.print(f"   Tell them: \"{self.identity.user_id}\"\n")
+        console.print("2. AGREE on a secret keyphrase (e.g., 'pizza')")
+        console.print("   Share this in person or via another secure channel\n")
+        console.print("3. ADD each other with the same keyphrase:")
+        console.print(f"   add <their-id> pizza TheirName\n")
+        console.print("4. SEND encrypted messages:")
+        console.print("   msg TheirName Hello!\n")
+        console.print("Type 'help' anytime to see all commands.\n")
+        console.print("═" * 50 + "\n")
 
     async def _load_contacts(self):
         """Load contacts from storage"""
@@ -165,23 +212,38 @@ class HappyPhoneCLI:
         signaling.on('call-end', on_call_end)
 
     async def _handle_incoming_message(self, event: SignalingEvent):
-        """Handle incoming encrypted message"""
-        if not event.from_user or not event.payload:
+        """Handle incoming encrypted message (supports both regular and sealed sender)"""
+        if not event.payload:
             return
-
-        contact = self.contacts.get(event.from_user)
-        sender_name = contact.pet_name if contact else event.from_user
 
         try:
             payload_data = json.loads(event.payload)
-            payload = EncryptedPayload.from_dict(payload_data)
+            
+            # Check if this is a sealed sender message
+            if is_sealed_sender(payload_data):
+                # Sealed sender - extract real sender from encrypted envelope
+                sealed_payload = SealedSenderPayload.from_dict(payload_data)
+                sender_user_id, sender_public_key, payload, msg_timestamp = unseal_sender(
+                    sealed_payload,
+                    self.identity.private_key
+                )
+            else:
+                # Legacy format - sender visible to server
+                if not event.from_user:
+                    return
+                sender_user_id = event.from_user
+                payload = EncryptedPayload.from_dict(payload_data)
+                msg_timestamp = int(datetime.now().timestamp() * 1000)
+            
+            contact = self.contacts.get(sender_user_id)
+            sender_name = contact.pet_name if contact else sender_user_id
             
             # Try Double Ratchet decryption first (v2)
             if payload.version == 2:
-                session_state = await storage.get_session_state(event.from_user)
+                session_state = await storage.get_session_state(sender_user_id)
                 if session_state:
                     plaintext, updated_state = decrypt_message_ratchet(payload, session_state)
-                    await storage.save_session_state(event.from_user, updated_state)
+                    await storage.save_session_state(sender_user_id, updated_state)
                 else:
                     # Initialize session if we don't have one (Bob side receiving first message)
                     if contact:
@@ -194,7 +256,7 @@ class HappyPhoneCLI:
                             payload,
                             session.get_state_dict()
                         )
-                        await storage.save_session_state(event.from_user, updated_state)
+                        await storage.save_session_state(sender_user_id, updated_state)
                     else:
                         raise ValueError("Cannot decrypt: contact not found")
             else:
@@ -203,16 +265,17 @@ class HappyPhoneCLI:
 
             # Save message
             msg_id = str(uuid.uuid4())
-            timestamp = int(datetime.now().timestamp() * 1000)
             await storage.save_message(
-                msg_id, event.from_user, 'received', plaintext, timestamp
+                msg_id, sender_user_id, 'received', plaintext, msg_timestamp
             )
 
-            # Display
+            # Display (show 🔒 for sealed sender)
             verified = "✓" if contact and contact.verified else "⚠"
-            console.print(f"\n[{sender_name}] {verified}: {plaintext}")
+            sealed_icon = "🔒" if is_sealed_sender(payload_data) else ""
+            console.print(f"\n[{sender_name}] {verified}{sealed_icon}: {plaintext}")
 
         except Exception as e:
+            sender_name = event.from_user or "unknown"
             console.print(f"\nFailed to decrypt message from {sender_name}: {e}")
 
     async def _handle_contact_request(self, event: SignalingEvent):
@@ -648,14 +711,23 @@ Commands:
             # Check if session is ready to send (has sending_chain_key)
             if session_state and session_state.get('sending_chain_key'):
                 # Use Double Ratchet
-                payload, updated_state = encrypt_message_ratchet(message, session_state)
+                inner_payload, updated_state = encrypt_message_ratchet(message, session_state)
                 await storage.save_session_state(contact.user_id, updated_state)
             else:
                 # Fallback to ephemeral encryption (no session or session not ready)
-                payload = encrypt_message(message, contact.public_key)
+                inner_payload = encrypt_message(message, contact.public_key)
 
-            # Send
-            await signaling.send_message(contact.user_id, payload)
+            # Wrap in sealed sender to hide our identity from the server
+            timestamp = int(datetime.now().timestamp() * 1000)
+            sealed_payload = seal_sender(
+                inner_payload,
+                self.identity,
+                contact.public_key,
+                timestamp
+            )
+
+            # Send (server only sees recipient, not sender)
+            await signaling.send_sealed_message(contact.user_id, sealed_payload)
 
             # Save locally
             msg_id = str(uuid.uuid4())
@@ -686,41 +758,43 @@ Commands:
 
         session = PromptSession()
         
-        while True:
-            try:
-                user_input = await session.prompt_async(f"{contact.pet_name}> ")
-                
-                if not user_input.strip():
-                    continue
-                
-                if user_input.strip() == '/exit':
+        # Use patch_stdout to allow incoming messages to display cleanly while typing
+        with patch_stdout():
+            while True:
+                try:
+                    user_input = await session.prompt_async(f"{contact.pet_name}> ")
+                    
+                    if not user_input.strip():
+                        continue
+                    
+                    if user_input.strip() == '/exit':
+                        console.print("\nExited chat mode.\n")
+                        break
+                    
+                    if user_input.strip() == '/history':
+                        messages = await storage.get_messages(contact.user_id, limit=10)
+                        if messages:
+                            console.print("\nRecent messages:")
+                            for msg in messages:
+                                direction = "→" if msg['direction'] == 'sent' else "←"
+                                time_str = datetime.fromtimestamp(msg['timestamp'] / 1000).strftime('%H:%M')
+                                console.print(f"  {time_str} {direction} {msg['content']}")
+                            console.print()
+                        else:
+                            console.print("No message history\n")
+                        continue
+                    
+                    # Send the message
+                    await self._cmd_send_message(contact.pet_name, user_input.strip())
+                    
+                except KeyboardInterrupt:
                     console.print("\nExited chat mode.\n")
                     break
-                
-                if user_input.strip() == '/history':
-                    messages = await storage.get_messages(contact.user_id, limit=10)
-                    if messages:
-                        console.print("\nRecent messages:")
-                        for msg in messages:
-                            direction = "→" if msg['direction'] == 'sent' else "←"
-                            time_str = datetime.fromtimestamp(msg['timestamp'] / 1000).strftime('%H:%M')
-                            console.print(f"  {time_str} {direction} {msg['content']}")
-                        console.print()
-                    else:
-                        console.print("No message history\n")
-                    continue
-                
-                # Send the message
-                await self._cmd_send_message(contact.pet_name, user_input.strip())
-                
-            except KeyboardInterrupt:
-                console.print("\nExited chat mode.\n")
-                break
-            except EOFError:
-                console.print("\nExited chat mode.\n")
-                break
-            except Exception as e:
-                console.print(f"Error: {e}")
+                except EOFError:
+                    console.print("\nExited chat mode.\n")
+                    break
+                except Exception as e:
+                    console.print(f"Error: {e}")
 
     async def _cmd_history(self, name: Optional[str]):
         """Show message history"""

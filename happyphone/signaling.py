@@ -9,7 +9,7 @@ import socketio
 from nacl.encoding import Base64Encoder
 
 from .config import SIGNALING_URL
-from .crypto import Identity, EncryptedPayload
+from .crypto import Identity, EncryptedPayload, SealedSenderPayload
 
 
 @dataclass
@@ -175,11 +175,19 @@ class SignalingClient:
     # === Sending Methods ===
 
     async def send_message(self, to: str, payload: EncryptedPayload):
-        """Send encrypted message"""
+        """Send encrypted message (legacy - exposes sender to server)"""
         await self.sio.emit('message', {
             'to': to,
             'payload': json.dumps(payload.to_dict()),
             'type': 'text',
+        })
+
+    async def send_sealed_message(self, to: str, payload: SealedSenderPayload):
+        """Send sealed sender message (hides sender identity from server)"""
+        await self.sio.emit('message', {
+            'to': to,
+            'payload': json.dumps(payload.to_dict()),
+            'type': 'sealed',
         })
 
     async def send_call_offer(self, to: str, offer: dict, payload: Optional[str] = None):

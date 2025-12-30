@@ -1,0 +1,10 @@
+- [x] Code: Fix real-time message display (prompt_toolkit)
+- [x] Code: Add message expiration/auto-delete
+- [x] Code: Persist skipped message keys to DB
+- [x] Code: Add sealed sender (hide metadata)
+- [x] Code: Add message padding (prevent traffic analysis)
+- [x] Deploy: Easy installer script for deps
+- [x] Deploy: Brew formula or pip install
+- [x] Deploy: First-run identity wizard
+- [x] Deploy: README with screenshots/GIFs
+- [x] Deploy: Troubleshooting FAQ from beta feedback

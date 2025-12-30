@@ -1,5 +1,6 @@
 """Cryptographic operations using PyNaCl (libsodium)"""
 
+import json
 import secrets
 import hashlib
 from dataclasses import dataclass
@@ -155,7 +156,7 @@ def get_shared_fingerprint(public_key1: bytes, public_key2: bytes) -> list[str]:
 
 
 def encrypt_message(plaintext: str, recipient_public_key: bytes) -> EncryptedPayload:
-    """Encrypt a message for a recipient using ephemeral keypair"""
+    """Encrypt a message for a recipient using ephemeral keypair (with padding)"""
     # Generate ephemeral keypair for forward secrecy
     ephemeral_private = PrivateKey.generate()
     ephemeral_public = ephemeral_private.public_key
@@ -164,9 +165,10 @@ def encrypt_message(plaintext: str, recipient_public_key: bytes) -> EncryptedPay
     recipient_key = PublicKey(recipient_public_key)
     box = Box(ephemeral_private, recipient_key)
 
-    # Encrypt
+    # Pad and encrypt to prevent traffic analysis
     plaintext_bytes = plaintext.encode('utf-8')
-    encrypted = box.encrypt(plaintext_bytes)
+    padded_plaintext = pad_message(plaintext_bytes)
+    encrypted = box.encrypt(padded_plaintext)
 
     return EncryptedPayload(
         ephemeral_public=bytes(ephemeral_public),
@@ -176,12 +178,19 @@ def encrypt_message(plaintext: str, recipient_public_key: bytes) -> EncryptedPay
 
 
 def decrypt_message(payload: EncryptedPayload, recipient_private_key: bytes) -> str:
-    """Decrypt a message using recipient's private key"""
+    """Decrypt a message using recipient's private key (with unpadding)"""
     private_key = PrivateKey(recipient_private_key)
     ephemeral_public = PublicKey(payload.ephemeral_public)
 
     box = Box(private_key, ephemeral_public)
-    plaintext_bytes = box.decrypt(payload.ciphertext, payload.nonce)
+    padded_plaintext = box.decrypt(payload.ciphertext, payload.nonce)
+    
+    # Try to unpad; if it fails (old message format), use raw content
+    try:
+        plaintext_bytes = unpad_message(padded_plaintext)
+    except ValueError:
+        # Legacy unpadded message
+        plaintext_bytes = padded_plaintext
 
     return plaintext_bytes.decode('utf-8')
 
@@ -242,7 +251,7 @@ def encrypt_message_ratchet(
     session_state: dict
 ) -> tuple[EncryptedPayload, dict]:
     """
-    Encrypt a message using Double Ratchet.
+    Encrypt a message using Double Ratchet (with padding).
     Returns: (encrypted_payload, updated_session_state)
     """
     from .session import Session
@@ -250,9 +259,12 @@ def encrypt_message_ratchet(
     # Load session
     session = Session.from_state_dict(session_state)
     
+    # Pad plaintext to prevent traffic analysis
+    padded_plaintext = pad_message(plaintext.encode('utf-8'))
+    
     # Encrypt and advance ratchet
     dh_public, ciphertext, msg_num, prev_chain_len = session.ratchet_encrypt(
-        plaintext.encode('utf-8')
+        padded_plaintext
     )
     
     # Create payload
@@ -273,7 +285,7 @@ def decrypt_message_ratchet(
     session_state: dict
 ) -> tuple[str, dict]:
     """
-    Decrypt a message using Double Ratchet.
+    Decrypt a message using Double Ratchet (with unpadding).
     Returns: (plaintext, updated_session_state)
     """
     from .session import Session
@@ -285,12 +297,177 @@ def decrypt_message_ratchet(
     session = Session.from_state_dict(session_state)
     
     # Decrypt and advance ratchet
-    plaintext_bytes = session.ratchet_decrypt(
+    padded_plaintext = session.ratchet_decrypt(
         payload.dh_public_key,
         payload.ciphertext,
         payload.message_number,
         payload.previous_chain_length,
     )
     
+    # Remove padding; handle legacy unpadded messages
+    try:
+        plaintext_bytes = unpad_message(padded_plaintext)
+    except ValueError:
+        # Legacy unpadded message
+        plaintext_bytes = padded_plaintext
+    
     # Return plaintext and updated state
     return plaintext_bytes.decode('utf-8'), session.get_state_dict()
+
+
+# === Sealed Sender Functions ===
+
+@dataclass
+class SealedSenderPayload:
+    """Sealed sender message format - hides sender identity from server"""
+    # Outer envelope (server can see)
+    sealed_content: bytes  # Encrypted inner content
+    ephemeral_public: bytes  # Ephemeral key for outer encryption
+    
+    # Inner content (only recipient can see, after decryption):
+    # - sender_user_id: str
+    # - sender_public_key: bytes  
+    # - inner_payload: EncryptedPayload (the actual message)
+    # - timestamp: int
+    
+    def to_dict(self) -> dict:
+        return {
+            'sealedSender': True,
+            'sealedContent': Base64Encoder.encode(self.sealed_content).decode('ascii'),
+            'ephemeralPublic': Base64Encoder.encode(self.ephemeral_public).decode('ascii'),
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'SealedSenderPayload':
+        if not data.get('sealedSender'):
+            raise ValueError("Not a sealed sender payload")
+        return cls(
+            sealed_content=Base64Encoder.decode(data['sealedContent'].encode('ascii')),
+            ephemeral_public=Base64Encoder.decode(data['ephemeralPublic'].encode('ascii')),
+        )
+
+
+def seal_sender(
+    inner_payload: EncryptedPayload,
+    sender_identity: Identity,
+    recipient_public_key: bytes,
+    timestamp: int
+) -> SealedSenderPayload:
+    """
+    Wrap a message in sealed sender encryption.
+    Hides the sender identity from the server - only recipient can see who sent it.
+    """
+    import time
+    
+    # Create inner content with sender info
+    inner_content = json.dumps({
+        'senderUserId': sender_identity.user_id,
+        'senderPublicKey': Base64Encoder.encode(sender_identity.public_key).decode('ascii'),
+        'innerPayload': inner_payload.to_dict(),
+        'timestamp': timestamp,
+    }).encode('utf-8')
+    
+    # Generate ephemeral keypair for outer encryption
+    ephemeral_private = PrivateKey.generate()
+    ephemeral_public = ephemeral_private.public_key
+    
+    # Encrypt to recipient's public key
+    recipient_key = PublicKey(recipient_public_key)
+    box = Box(ephemeral_private, recipient_key)
+    sealed_content = box.encrypt(inner_content)
+    
+    return SealedSenderPayload(
+        sealed_content=bytes(sealed_content),
+        ephemeral_public=bytes(ephemeral_public),
+    )
+
+
+def unseal_sender(
+    sealed_payload: SealedSenderPayload,
+    recipient_private_key: bytes
+) -> tuple[str, bytes, EncryptedPayload, int]:
+    """
+    Decrypt a sealed sender message.
+    Returns: (sender_user_id, sender_public_key, inner_payload, timestamp)
+    """
+    # Decrypt outer envelope
+    private_key = PrivateKey(recipient_private_key)
+    ephemeral_public = PublicKey(sealed_payload.ephemeral_public)
+    
+    box = Box(private_key, ephemeral_public)
+    inner_content = box.decrypt(sealed_payload.sealed_content)
+    
+    # Parse inner content
+    data = json.loads(inner_content.decode('utf-8'))
+    
+    sender_user_id = data['senderUserId']
+    sender_public_key = Base64Encoder.decode(data['senderPublicKey'].encode('ascii'))
+    inner_payload = EncryptedPayload.from_dict(data['innerPayload'])
+    timestamp = data['timestamp']
+    
+    return sender_user_id, sender_public_key, inner_payload, timestamp
+
+
+def is_sealed_sender(data: dict) -> bool:
+    """Check if a message payload is sealed sender format"""
+    return data.get('sealedSender', False) is True
+
+
+# === Message Padding Functions ===
+# Padding prevents traffic analysis by making all messages the same size
+
+# Padding block sizes (in bytes) - messages are padded to nearest block
+PADDING_BLOCK_SIZES = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+
+
+def pad_message(plaintext: bytes) -> bytes:
+    """
+    Pad message to prevent traffic analysis.
+    Uses block padding - message is padded to the next power-of-2-like block size.
+    Format: [1 byte padding length][padding bytes][original message]
+    """
+    msg_len = len(plaintext)
+    
+    # Find appropriate block size
+    target_size = PADDING_BLOCK_SIZES[0]
+    for size in PADDING_BLOCK_SIZES:
+        if msg_len < size - 2:  # Need at least 2 bytes for length prefix
+            target_size = size
+            break
+    else:
+        # Message too large, use largest block + message size
+        target_size = PADDING_BLOCK_SIZES[-1]
+        while target_size < msg_len + 2:
+            target_size *= 2
+    
+    # Calculate padding needed (minus 2 bytes for length prefix)
+    padding_len = target_size - msg_len - 2
+    if padding_len < 0:
+        padding_len = 0
+    if padding_len > 65535:  # Max 2-byte length
+        padding_len = 65535
+    
+    # Generate random padding
+    padding = nacl_random(padding_len)
+    
+    # Encode padding length as 2 bytes (big endian)
+    length_prefix = padding_len.to_bytes(2, 'big')
+    
+    return length_prefix + padding + plaintext
+
+
+def unpad_message(padded: bytes) -> bytes:
+    """
+    Remove padding from message.
+    """
+    if len(padded) < 2:
+        raise ValueError("Invalid padded message: too short")
+    
+    # Read padding length from first 2 bytes
+    padding_len = int.from_bytes(padded[:2], 'big')
+    
+    if len(padded) < 2 + padding_len:
+        raise ValueError("Invalid padded message: padding length exceeds message")
+    
+    # Return message after padding
+    return padded[2 + padding_len:]

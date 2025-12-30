@@ -28,18 +28,26 @@ classifiers = [
     "Topic :: Communications",
     "Topic :: Security :: Cryptography",
 ]
+# Core dependencies (text messaging only)
 dependencies = [
     "pynacl>=1.5.0",
     "python-socketio[asyncio_client]>=5.10.0",
     "aiohttp>=3.9.0",
-    "aiortc>=1.6.0",
-    "pyaudio>=0.2.14",
     "prompt-toolkit>=3.0.0",
     "rich>=13.0.0",
     "aiosqlite>=0.19.0",
 ]
 
 [project.optional-dependencies]
+# Voice call support (requires system libs: portaudio, opus)
+voice = [
+    "aiortc>=1.6.0",
+    "pyaudio>=0.2.14",
+]
+# Full install with voice
+full = [
+    "happyphone[voice]",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

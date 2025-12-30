@@ -2,17 +2,68 @@
 
 End-to-end encrypted communication platform with Perfect Forward Secrecy using Signal's Double Ratchet Algorithm.
 
+```
+┌───────────────────────────────────────────────────────────┐
+│  🎉 Welcome to Happy Phone!                               │
+│───────────────────────────────────────────────────────────┤
+│  $ happy                                                  │
+│  Your ID: abc123                                          │
+│  Fingerprint: 🔐🦊🌲🎸🚀🌙🎨🦋                               │
+│                                                           │
+│  [abc123]> add xyz789 pizza Alice                         │
+│  ✓ Contact verified and added: Alice                      │
+│                                                           │
+│  [abc123]> msg Alice Hello!                               │
+│  → Alice: Hello!                                          │
+│                                                           │
+│  [Alice] ✓🔒: Hey! Nice to hear from you!                  │
+└───────────────────────────────────────────────────────────┘
+```
+
+## 🚀 Quick Install
+
+```bash
+# One-line install (macOS/Linux)
+curl -fsSL https://happy.land/install.sh | bash
+
+# Or with pip (text messaging only)
+pip install happyphone
+
+# With voice call support
+pip install happyphone[voice]
+```
+
+## ⚡ Quick Start
+
+```bash
+# 1. Start Happy Phone
+happy
+
+# 2. Share your ID with a friend (shown on startup)
+#    Your ID: abc123
+
+# 3. Agree on a secret keyphrase (e.g., "pizza")
+#    Share this in person or via another secure channel
+
+# 4. Both of you add each other:
+add <their-id> pizza FriendName
+
+# 5. Send encrypted messages!
+msg FriendName Hey, this is private!
+```
+
 ## Table of Contents
 
 - [Overview](#overview)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Troubleshooting](#troubleshooting)
 - [Architecture](#architecture)
 - [Cryptographic Implementation](#cryptographic-implementation)
 - [Storage Layer](#storage-layer)
 - [Signaling Protocol](#signaling-protocol)
 - [Azure Deployment](#azure-deployment)
 - [Testing](#testing)
-- [Installation](#installation)
-- [Usage](#usage)
 - [Roadmap](#roadmap)
 
 ---
@@ -705,24 +756,49 @@ Expected:
 
 ## Installation
 
-### Client Installation
+### Quick Install (Recommended)
+
+```bash
+# Download and run the installer
+curl -fsSL https://raw.githubusercontent.com/happyphone/happyphone-cli/main/install-happyphone.sh | bash
+
+# Or clone and run locally
+git clone https://github.com/happyphone/happyphone-cli.git
+cd happyphone-cli
+./install-happyphone.sh
+```
+
+### pip Install
+
+```bash
+# Text messaging only (no system dependencies needed)
+pip install happyphone
+
+# With voice calls (requires portaudio)
+brew install portaudio  # macOS
+sudo apt install portaudio19-dev  # Debian/Ubuntu
+pip install happyphone[voice]
+```
+
+### Manual Install
 
 #### Requirements
 
-- Python 3.10+
+- Python 3.9+
 - pip
 - SQLite (usually pre-installed)
-
-#### Install Dependencies
+- For voice: portaudio, opus, libvpx
 
 ```bash
 cd happyphone-cli
-pip install -r requirements.txt
+pip install -e .
 ```
 
 #### Run
 
 ```bash
+happyphone
+# or
 python -m happyphone
 ```
 
@@ -890,13 +966,115 @@ export HAPPYPHONE_TURN_PASS=<password>
 
 ### Known Limitations
 
-1. **Skipped message keys not persisted**: Out-of-order keys stored in memory only. Database restart loses them (low risk, rare scenario).
+1. ~~**Skipped message keys not persisted**~~: ✅ Fixed! Keys now stored in database.
 
-2. **No sealed sender**: Server knows who sends to whom (metadata), but not message content.
+2. ~~**No sealed sender**~~: ✅ Fixed! Sender identity now hidden from server.
 
-3. **Real-time UI updates**: prompt_toolkit limitations prevent live message display without checking history.
+3. ~~**Real-time UI updates**~~: ✅ Fixed! Messages display in real-time during chat.
 
-4. **No message deletion**: Old messages remain in SQLite. Future: add expiration policies.
+4. ~~**No message deletion**~~: ✅ Fixed! Messages auto-expire after 7 days (configurable).
+
+---
+
+## Troubleshooting
+
+### Installation Issues
+
+**Q: `pip install` fails with "portaudio.h not found"**
+```bash
+# macOS
+brew install portaudio
+
+# Ubuntu/Debian
+sudo apt install portaudio19-dev
+
+# Or skip voice support
+pip install happyphone  # without [voice]
+```
+
+**Q: Python version error**
+```bash
+# Check your version
+python3 --version  # Need 3.9+
+
+# macOS: Install newer Python
+brew install python@3.11
+
+# Ubuntu: Use deadsnakes PPA
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt install python3.11
+```
+
+### Connection Issues
+
+**Q: "Connection failed" or "Not connected"**
+- Check internet connection
+- Server may be down - try again in a few minutes
+- Firewall blocking WebSocket connections? Try port 443
+
+**Q: "TEE attestation required but server is not in TEE"**
+```bash
+# Disable TEE requirement (messages still E2E encrypted)
+export HAPPYPHONE_TEE_REQUIRED=false
+happy
+```
+
+### Contact Issues
+
+**Q: "Verification failed - keyphrase mismatch"**
+- Both parties must use the **exact same keyphrase**
+- Keyphrase is case-insensitive but spaces matter
+- Make sure you're adding each other's correct ID
+
+**Q: Can't decrypt messages from a contact**
+- Delete and re-add the contact
+- This resets the encryption session
+```bash
+delete ContactName
+add <their-id> <keyphrase> ContactName
+```
+
+### Voice Call Issues
+
+**Q: "Audio not available"**
+```bash
+# Install voice dependencies
+pip install pyaudio aiortc
+
+# May also need system libraries
+brew install portaudio opus libvpx  # macOS
+```
+
+**Q: Call connects but no audio**
+- Check microphone permissions
+- TURN server may be needed for NAT traversal
+- Both parties need working audio devices
+
+### Data Issues
+
+**Q: How do I backup my identity?**
+```bash
+# Your data is in ~/.happyphone/
+cp -r ~/.happyphone ~/.happyphone-backup
+```
+
+**Q: How do I start fresh?**
+```bash
+# In the app:
+reset
+
+# Or manually:
+rm -rf ~/.happyphone
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HAPPYPHONE_SIGNAL_URL` | signal.happy.land | Signaling server |
+| `HAPPYPHONE_DATA_DIR` | ~/.happyphone | Data directory |
+| `HAPPYPHONE_MSG_EXPIRE` | 604800 (7 days) | Message TTL in seconds, 0=never |
+| `HAPPYPHONE_TEE_REQUIRED` | true | Require TEE attestation |
 
 5. **Single device**: Each device has separate identity. Multi-device support requires session syncing protocol.
 

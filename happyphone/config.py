@@ -26,6 +26,10 @@ AUDIO_SAMPLE_RATE = 48000
 AUDIO_CHANNELS = 1
 AUDIO_CHUNK_SIZE = 960  # 20ms at 48kHz
 
+# Message expiration (auto-delete)
+# Default: 7 days (604800 seconds), 0 = no expiration
+MESSAGE_EXPIRATION_SECONDS = int(os.environ.get("HAPPYPHONE_MSG_EXPIRE", "604800"))
+
 # TEE Attestation settings
 TEE_ATTESTATION_ENABLED = os.environ.get("HAPPYPHONE_TEE_ENABLED", "true").lower() == "true"
 TEE_REQUIRE_ATTESTATION = os.environ.get("HAPPYPHONE_TEE_REQUIRED", "true").lower() == "true"
