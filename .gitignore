@@ -49,3 +49,5 @@ server/node_modules/
 # PyAudio source
 PyAudio-*/
 *.tar.gz
+TURN-CREDENTIALS.txt
+dist/
